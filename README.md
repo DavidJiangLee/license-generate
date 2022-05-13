@@ -76,3 +76,5 @@
 ![img.png](image/img_5.png)
 
 ![img.png](image/img_6.png)
+
+<font color="red">需要注意的事项： 发现是在通过keytool生成密钥对的时候，公、私钥库的密码不一样（与私钥密码无关），设置为一样的以后，就可以了。</font>
