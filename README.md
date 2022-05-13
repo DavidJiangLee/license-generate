@@ -2,7 +2,7 @@
 
 #### 介绍
 
-    使用TrueLicense 生成和验证License（服务器许可）
+    使用TrueLicense 生成和验证License（服务器许可），及Springboot项目如何集成TrueLicense
 
 ### 二、原理
 
@@ -68,13 +68,257 @@
 
 ![img.png](image/img_4.png)
 
-### 六、将生成的许可文件及公钥配置给需要使用的文件
+### 六、将生成的许可文件及公钥配置给需要使用的文件项目中
 
-    此处使用springboot项目进行集成
+    此处使用springboot项目进行集成，首先需要将此工程打包。
 
 首先需要将此工程打包后，传入maven私库或者导入项目，我这里上传到私库。
 ![img.png](image/img_5.png)
 
+<font color="red">需要注意的事项： 发现是在通过keytool生成密钥对的时候，公、私钥库的密码不一样（与私钥密码无关），设置为一样的以后，就可以了。</font>
+
+#### 1、导入相关依赖
+
+    将上传到私库的包，导入到新建立的项目中，同时导入truelicense相关的依赖如下
+
+```xml
+
+<dependencies>
+    <dependency>
+        <groupId>org.lee</groupId>
+        <artifactId>license-generate</artifactId>
+        <version>1.0.0</version>
+    </dependency>
+
+    <dependency>
+        <groupId>de.schlichtherle.truelicense</groupId>
+        <artifactId>truelicense-core</artifactId>
+    </dependency>
+</dependencies>
+```
+
+#### 2、在yaml文件中添加配置，文件路径及公钥库密码请根据你自己的实际情况配置
+
+```yaml
+
+license:
+  subject: test-license
+  public-alias: publicCert
+  public-store-pass: 123456q
+  license-path: E:\license\license.lic
+  public-keys-store-path: E:\license\publicCerts.store
+```
+
+#### 3、 创建校验类及拦截器
+
+    首先创建校验类，然后创建拦截器；通过拦截器校验器去调用校验方法，如果许可超过有效期则进行提示。
+
+```java
+
+import cn.hutool.core.date.DatePattern;
+import cn.hutool.core.date.DateUtil;
+import de.schlichtherle.license.*;
+import lombok.extern.slf4j.Slf4j;
+import org.lee.license.manager.CustomLicenseManager;
+import org.lee.license.param.CustomKeyStoreParam;
+
+import java.io.File;
+import java.util.prefs.Preferences;
+
+/**
+ * License校验类
+ */
+@Slf4j
+public class LicenseVerify {
+
+    /**
+     * 证书subject
+     */
+    private final String subject;
+    /**
+     * 公钥别称
+     */
+    private final String publicAlias;
+    /**
+     * 访问公钥库的密码
+     */
+    private final String storePass;
+    /**
+     * 证书生成路径
+     */
+    private final String licensePath;
+    /**
+     * 密钥库存储路径
+     */
+    private final String publicKeysStorePath;
+    /**
+     * LicenseManager
+     */
+    private LicenseManager licenseManager;
+    /**
+     * 标识证书是否安装成功
+     */
+    private boolean installSuccess;
+
+    public LicenseVerify(String subject, String publicAlias, String storePass, String licensePath, String publicKeysStorePath) {
+        this.subject = subject;
+        this.publicAlias = publicAlias;
+        this.storePass = storePass;
+        this.licensePath = licensePath;
+        this.publicKeysStorePath = publicKeysStorePath;
+    }
+
+    /**
+     * 安装License证书，读取证书相关的信息, 在bean加入容器的时候自动调用
+     */
+    public void installLicense() {
+        try {
+            Preferences preferences = Preferences.userNodeForPackage(LicenseVerify.class);
+
+            CipherParam cipherParam = new DefaultCipherParam(storePass);
+
+            KeyStoreParam publicStoreParam = new CustomKeyStoreParam(LicenseVerify.class,
+                    publicKeysStorePath,
+                    publicAlias,
+                    storePass,
+                    null);
+            LicenseParam licenseParam = new DefaultLicenseParam(subject, preferences, publicStoreParam, cipherParam);
+
+            licenseManager = new CustomLicenseManager(licenseParam);
+            licenseManager.uninstall();
+            LicenseContent licenseContent = licenseManager.install(new File(licensePath));
+            installSuccess = true;
+            log.error("------------------------------- 证书安装成功 -------------------------------");
+            log.error("证书有效期：{} - {}", DateUtil.format(licenseContent.getNotBefore(), DatePattern.NORM_DATETIME_PATTERN), DateUtil.format(licenseContent.getNotAfter(), DatePattern.NORM_DATETIME_PATTERN));
+        } catch (Exception e) {
+            installSuccess = false;
+            e.printStackTrace();
+            log.error("------------------------------- 证书安装成功 -------------------------------");
+            log.error("证书已经超期");
+        }
+    }
+
+    /**
+     * 卸载证书，在bean从容器移除的时候自动调用
+     */
+    public void unInstallLicense() {
+        if (installSuccess) {
+            try {
+                licenseManager.uninstall();
+            } catch (Exception e) {
+                log.error(e.getMessage(), e);
+            }
+        }
+    }
+
+    /**
+     * 校验License证书
+     */
+    public boolean verify() {
+        try {
+            licenseManager.verify();
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+}
+```
+
+```java
+
+import com.alibaba.fastjson.JSONObject;
+import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.HandlerInterceptor;
+
+import javax.annotation.Resource;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+
+/**
+ * @author ltb
+ * @date 2022/5/11
+ */
+@Component
+public class ValidateTimeInterceptor implements HandlerInterceptor {
+
+    @Resource
+    private LicenseVerify licenseVerify;
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws IOException {
+        if (!licenseVerify.verify()) {
+            response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+            JSONObject retData = new JSONObject();
+            retData.put("code", 500);
+            retData.put("msg", "您的证书无效，请核查服务器是否取得授权或重新申请证书！");
+            response.getWriter().write(retData.toJSONString());
+            return false;
+        }
+        return true;
+    }
+}
+
+```
+
+#### 4、创建配置类，配置方法能够安装上许可证书
+
+```java
+
+
+import com.hstech.license.LicenseVerify;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class LicenseConfig {
+
+    /**
+     * 证书subject
+     */
+    @Value("${license.subject}")
+    private String subject;
+
+    /**
+     * 公钥别称
+     */
+    @Value("${license.public-alias}")
+    private String publicAlias;
+
+    /**
+     * 访问公钥库的密码
+     */
+    @Value("${license.public-store-pass}")
+    private String storePass;
+
+    /**
+     * 证书生成路径
+     */
+    @Value("${license.license-path}")
+    private String licensePath;
+
+    /**
+     * 密钥库存储路径
+     */
+    @Value("${license.public-keys-store-path}")
+    private String publicKeysStorePath;
+
+    @Bean(initMethod = "installLicense", destroyMethod = "unInstallLicense")
+    public LicenseVerify licenseVerify() {
+        return new LicenseVerify(subject, publicAlias, storePass, licensePath, publicKeysStorePath);
+    }
+
+}
+```
+
+#### 5、启动项目
+
+    可以在控制台上看到，有效期的起始时间
+
 ![img.png](image/img_6.png)
 
-<font color="red">需要注意的事项： 发现是在通过keytool生成密钥对的时候，公、私钥库的密码不一样（与私钥密码无关），设置为一样的以后，就可以了。</font>
+    至此，对于使用truelicense的许可证书的使用就介绍完成了，都看到这里了，麻烦给个小星星，您的每个小星星都是对我的支持。
